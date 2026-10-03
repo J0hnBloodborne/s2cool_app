@@ -83,7 +83,11 @@ Put your real domain in this file:
 ```caddyfile
 demo.example.com {
     encode gzip
-    reverse_proxy 127.0.0.1:8050
+    reverse_proxy 127.0.0.1:8050 {
+        transport http {
+            keepalive 30s
+        }
+    }
 }
 ```
 

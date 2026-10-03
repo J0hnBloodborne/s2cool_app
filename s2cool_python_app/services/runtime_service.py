@@ -24,6 +24,27 @@ MODEL_RUN_LOCK = threading.Lock()
 PROFILE_LOCK = threading.Lock()
 
 
+def small_demo_enabled() -> bool:
+    return os.environ.get("S2COOL_SMALL_DEMO") == "1"
+
+
+def limit_demo_settings(model: str, settings: dict, error_class=ValueError) -> dict:
+    """Apply server limits even when a request bypasses the browser controls."""
+    result = dict(settings)
+    if not small_demo_enabled():
+        return result
+    if model not in {"xgboost", "extra_trees", "random_forest", "hybrid_xgboost",
+                     "hybrid_gradient_boosting", "physics_only", "persistence"}:
+        raise error_class("This model is disabled in the small demo. Use Extra Trees or run it locally.")
+    for name, maximum in (("max_training_rows", 2000), ("n_estimators", 30), ("max_depth", 6)):
+        try:
+            value = int(result.get(name, maximum))
+        except (TypeError, ValueError, OverflowError):
+            raise error_class("Enter a valid whole number for the model settings.") from None
+        result[name] = min(value, maximum) if value > 0 else maximum
+    return result
+
+
 def initialize_runtime() -> None:
     """Seed writable data once; app updates must not replace saved work."""
     seeds = [

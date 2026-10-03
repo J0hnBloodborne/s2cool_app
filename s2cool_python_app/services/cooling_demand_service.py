@@ -30,7 +30,7 @@ from services.config_service import (
     load_cooling_site_payloads,
     load_systems,
 )
-from services.runtime_service import DATA_ROOT, REPO_ROOT, MODEL_THREADS, PROFILE_LOCK, run_stamp, safe_child, serialized_run
+from services.runtime_service import DATA_ROOT, REPO_ROOT, MODEL_THREADS, PROFILE_LOCK, limit_demo_settings, small_demo_enabled, run_stamp, safe_child, serialized_run
 from services.upload_service import decode_csv_upload
 
 M3_DIR = REPO_ROOT / "M3_CoolingLoad_prediction_module"
@@ -128,6 +128,9 @@ def model_availability() -> dict[str, bool]:
         "persistence": True,
     }
     availability["hybrid_xgboost"] = availability["xgboost"]
+    if small_demo_enabled():
+        for name in ("lightgbm", "catboost", "lstm"):
+            availability[name] = False
     return availability
 
 
@@ -138,7 +141,12 @@ def model_options(include_baselines: bool = True) -> list[dict[str, Any]]:
     for name in names:
         spec = MODEL_SPECS[name]
         ready = availability[name]
-        label = spec["label"] if ready else f"{spec['label']} (install {spec['package']})"
+        label = spec["label"] if ready else (
+            f"{spec['label']} (run locally)" if small_demo_enabled()
+            else f"{spec['label']} (install {spec['package']})"
+        )
+        if name in {"xgboost", "hybrid_xgboost"} and importlib.util.find_spec("xgboost") is None:
+            label = "Gradient Boosting (XGBoost fallback)"
         options.append({"label": label, "value": name, "disabled": not ready})
     return options
 
@@ -769,6 +777,8 @@ def _experimental_q_measured(contents: str, filename: str | None, m3) -> pd.Data
 
 
 def _run(request: dict[str, Any], latest_only: bool = False) -> dict[str, Any]:
+    if small_demo_enabled() and request.get("auto_calibrate"):
+        raise CoolingDemandError("Thermal calibration is disabled in the small demo. Run it locally.")
     checked = validate_cooling_input(request)
     source: CoolingSource = checked["source"]
     profile = checked["profile"]
@@ -829,6 +839,7 @@ def _run(request: dict[str, Any], latest_only: bool = False) -> dict[str, Any]:
         settings.update(requested_settings[checked["model"]])
     elif isinstance(requested_settings, dict):
         settings.update(requested_settings)
+    settings = limit_demo_settings(checked["model"], settings, CoolingDemandError)
     model_frame, model_details = _build_model_frame(raw, feature_cols, effective_train, effective_test, checked["model"], settings)
     model_frame = m3.add_prediction_intervals(model_frame, alpha=checked["interval_alpha"])
     forecast = _build_cooling_horizon_frame(model_frame, checked["horizons"])

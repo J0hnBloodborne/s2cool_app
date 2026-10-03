@@ -9,6 +9,8 @@ threads = 4
 # gthread still answers page/health requests while a model is running.
 timeout = 300
 graceful_timeout = 30
+# Longer than the shared site's Caddy upstream idle timeout (30 seconds).
+keepalive = 65
 accesslog = "-"
 errorlog = "-"
 capture_output = True

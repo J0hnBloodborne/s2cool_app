@@ -49,6 +49,9 @@ Follow [README_ORACLE.md](README_ORACLE.md). It includes the upload, install,
 login, restart, and backup steps. The server uses one app process and allows
 one model run at a time. Pages can still load during training.
 
+For the existing 1 GB x86 server, use [README_SHARED_SERVER.md](README_SHARED_SERVER.md)
+and its smaller demo limits instead.
+
 ## Checks
 
 ```powershell

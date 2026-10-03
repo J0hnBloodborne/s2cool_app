@@ -89,6 +89,31 @@ def test_hosted_login_configuration_is_required(monkeypatch):
         configure_access(Flask("missing-login"))
 
 
+def test_verified_login_reused_and_wrong_password_still_rejected(monkeypatch):
+    from services import access_service
+    monkeypatch.setenv("S2COOL_AUTH_USER", "demo")
+    monkeypatch.setenv("S2COOL_PASSWORD_HASH", generate_password_hash("test-demo-password"))
+    checks = []
+    original = access_service.check_password_hash
+
+    def check(stored_hash, password):
+        checks.append(password)
+        return original(stored_hash, password)
+
+    monkeypatch.setattr(access_service, "check_password_hash", check)
+    server = Flask("cached-auth-test")
+    configure_access(server)
+    server.add_url_rule("/", view_func=lambda: "ok")
+    client = server.test_client()
+    for _ in range(4):
+        assert client.get("/", auth=("demo", "test-demo-password")).status_code == 200
+    assert checks == ["test-demo-password"]
+    assert client.get("/", auth=("demo", "wrong")).status_code == 401
+    assert client.get("/", auth=("other", "test-demo-password")).status_code == 401
+    assert client.get("/", auth=("demo", "test-demo-password")).status_code == 200
+    assert checks == ["test-demo-password", "wrong"]
+
+
 def test_second_model_run_is_rejected_while_pages_stay_available():
     with MODEL_RUN_LOCK:
         with ThreadPoolExecutor(max_workers=1) as pool:

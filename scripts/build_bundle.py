@@ -8,7 +8,8 @@ TREES = ("s2cool_python_app", "M2_PVnowcasting_module", "M3_CoolingLoad_predicti
          "deployment", "scripts", "tests")
 FILES = ("run.py", "wsgi.py", "requirements.txt", "requirements-models.txt", "requirements-lstm.txt",
          "requirements-dev.txt", "README.md", "README_ORACLE.md", "DEPLOYMENT_FILE_MANIFEST.md",
-         "setup-local.ps1", "pytest.ini", "ruff.toml", ".env.example", ".gitattributes", "DEPLOYMENT_STATUS.md")
+         "setup-local.ps1", "pytest.ini", "ruff.toml", ".env.example", ".gitattributes", "DEPLOYMENT_STATUS.md",
+         "README_SHARED_SERVER.md")
 
 
 def main():

@@ -12,6 +12,7 @@ from pages import cooling_demand, dashboard, data_analysis, pv_forecasting
 from services.config_service import get_system, get_system_options
 from services.dataset_service import latest_system_dataset_path
 from services.access_service import configure_access
+from services.runtime_service import small_demo_enabled
 
 APP_TITLE = "S2Cool Research Dashboard"
 TAB_ITEMS = [
@@ -40,6 +41,11 @@ default_system = next(
 app.layout = html.Div(
     className="app-shell",
     children=[
+        html.Div(
+            "Small demo: training uses up to 2,000 rows and 30 trees per model. "
+            "LSTMs and thermal calibration can run on the local setup.",
+            style={"padding": "10px 20px", "background": "#fff4d6", "color": "#594419"},
+        ) if small_demo_enabled() else None,
         html.Div(
             className="topbar",
             children=[

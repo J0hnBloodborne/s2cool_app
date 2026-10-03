@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 import joblib
 
-from services.runtime_service import DATA_ROOT, REPO_ROOT, MODEL_THREADS, run_stamp, safe_child, serialized_run
+from services.runtime_service import DATA_ROOT, REPO_ROOT, MODEL_THREADS, limit_demo_settings, small_demo_enabled, run_stamp, safe_child, serialized_run
 
 PREPROCESSING_DIR = DATA_ROOT / "M2_PVnowcasting_module" / "preprocessing"
 FORECAST_OUTPUT_DIR = DATA_ROOT / "M2_PVnowcasting_module" / "forecast"
@@ -113,7 +113,9 @@ def model_availability() -> dict[str, bool]:
     """Return whether each optional model dependency is available."""
     availability = {}
     for name, spec in MODEL_SPECS.items():
-        if name == "xgboost":
+        if small_demo_enabled() and name in {"lightgbm", "catboost", "lstm"}:
+            availability[name] = False
+        elif name == "xgboost":
             # M2 has a GradientBoostingRegressor fallback, so this option is
             # always runnable even when the optional xgboost wheel is absent.
             availability[name] = True
@@ -136,7 +138,12 @@ def model_options() -> list[dict[str, Any]]:
     options = []
     for name, spec in MODEL_SPECS.items():
         ready = available[name]
-        label = spec["label"] if ready else f"{spec['label']} (install {spec['package']})"
+        label = spec["label"] if ready else (
+            f"{spec['label']} (run locally)" if small_demo_enabled()
+            else f"{spec['label']} (install {spec['package']})"
+        )
+        if name == "xgboost" and importlib.util.find_spec("xgboost") is None:
+            label = "Gradient Boosting (XGBoost fallback)"
         options.append({"label": label, "value": name, "disabled": not ready})
     return options
 
@@ -269,6 +276,7 @@ def _train_and_predict(
     m2 = _load_m2_module()
     settings = dict(DEFAULT_MODEL_SETTINGS.get(model_name, {}))
     settings.update(model_settings or {})
+    settings = limit_demo_settings(model_name, settings, ForecastingError)
     horizon_df, target_column = _add_horizon_target(df, horizon_minutes)
     train_rows = max(60, min(len(df) - 1, int(len(df) * (1.0 - test_size))))
     train_df = horizon_df.iloc[:train_rows].copy()
@@ -328,6 +336,7 @@ def _fit_model(df: pd.DataFrame, model_name: str, test_size: float, model_settin
     m2 = _load_m2_module()
     settings = dict(DEFAULT_MODEL_SETTINGS.get(model_name, {}))
     settings.update(model_settings or {})
+    settings = limit_demo_settings(model_name, settings, ForecastingError)
     horizon_df, target_column = _add_horizon_target(df, horizon_minutes)
     train_rows = max(60, min(len(df) - 1, int(len(df) * (1.0 - test_size))))
     train_df = horizon_df.iloc[:train_rows].copy()
@@ -374,13 +383,14 @@ def train_model(request: dict[str, Any]) -> dict[str, Any]:
     test_size = float(request.get("test_size", artifact.metadata.get("config", {}).get("test_size", 0.2)))
     configured = request.get("model_settings") or {}
     effective_settings = {
-        model_name: {**DEFAULT_MODEL_SETTINGS.get(model_name, {}), **(configured.get(model_name) or {})}
+        model_name: limit_demo_settings(model_name, {**DEFAULT_MODEL_SETTINGS.get(model_name, {}),
+                                                    **(configured.get(model_name) or {})}, ForecastingError)
         for model_name in models
     }
     bundle = {"artifact_id": artifact.artifact_id, "metadata": artifact.metadata, "horizons": horizons, "models": models, "model_settings": effective_settings, "capacity_kw": float(request.get("capacity_kw") or artifact.metadata.get("capacity_kw") or 1.0), "estimators": {}}
     for model_name in models:
         bundle["estimators"][model_name] = {
-            horizon: _fit_model(df, model_name, test_size, configured.get(model_name), horizon)
+            horizon: _fit_model(df, model_name, test_size, effective_settings[model_name], horizon)
             for horizon in horizons
         }
     token = uuid.uuid4().hex

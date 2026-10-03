@@ -4,5 +4,9 @@
     request_body {
         max_size 40MB
     }
-    reverse_proxy 127.0.0.1:8050
+    reverse_proxy 127.0.0.1:8050 {
+        transport http {
+            keepalive 30s
+        }
+    }
 }
