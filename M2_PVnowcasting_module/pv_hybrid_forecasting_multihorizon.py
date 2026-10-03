@@ -27,6 +27,7 @@ Usage (from workspace root):
 """
 
 import argparse
+import os
 import re
 from pathlib import Path
 
@@ -55,6 +56,22 @@ except Exception:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+MODEL_THREADS = max(1, int(os.environ.get("S2COOL_MODEL_THREADS", "2")))
+if torch is not None:
+    torch.set_num_threads(MODEL_THREADS)
+
+    class LSTMRegressor(nn.Module):
+        """Module-level class so trained models can be saved and restored."""
+
+        def __init__(self, input_size: int, hidden_size: int = 64):
+            super().__init__()
+            self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size, batch_first=True)
+            self.head = nn.Sequential(nn.Dropout(0.2), nn.Linear(hidden_size, 32), nn.ReLU(), nn.Linear(32, 1))
+
+        def forward(self, x):
+            out, _ = self.lstm(x)
+            return self.head(out[:, -1, :])
+
 HORIZONS = {"5m": 5, "15m": 15, "30m": 30}
 FEATURE_COLS = [
     "ghi_pyr",
@@ -171,6 +188,7 @@ def train_xgb_model(
             colsample_bytree=float(settings.get("colsample_bytree", 0.9)),
             random_state=42,
             verbosity=0,
+            n_jobs=MODEL_THREADS,
         )
     else:
         model = GradientBoostingRegressor(
@@ -222,21 +240,6 @@ def train_lstm_model(
 
     torch.manual_seed(42)
     np.random.seed(42)
-
-    class LSTMRegressor(nn.Module):
-        def __init__(self, input_size: int, hidden_size: int = 64):
-            super().__init__()
-            self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size, batch_first=True)
-            self.head = nn.Sequential(
-                nn.Dropout(0.2),
-                nn.Linear(hidden_size, 32),
-                nn.ReLU(),
-                nn.Linear(32, 1),
-            )
-
-        def forward(self, x):
-            out, _ = self.lstm(x)
-            return self.head(out[:, -1, :])
 
     device = torch.device("cpu")
     model = LSTMRegressor(input_size=len(FEATURE_COLS)).to(device)

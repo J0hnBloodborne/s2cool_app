@@ -1,0 +1,8 @@
+# Optional public HTTPS demo. Point this domain at the VM first.
+{$S2COOL_DOMAIN} {
+    encode gzip
+    request_body {
+        max_size 40MB
+    }
+    reverse_proxy 127.0.0.1:8050
+}

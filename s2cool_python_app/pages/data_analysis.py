@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import json
 from functools import lru_cache
 
@@ -16,6 +15,8 @@ from services.dataset_service import (
     parse_system_dataset_filename,
 )
 from services.new_system_service import NewSystemError, create_new_system_dataset
+from services.runtime_service import safe_child
+from services.upload_service import decode_csv_upload, save_csv_upload
 from services.preprocessing_service import (
     DEFAULT_CONFIG,
     DEFAULT_LAG_COLUMNS,
@@ -147,7 +148,7 @@ def _add_derived_power_column(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
 
 @lru_cache(maxsize=32)
 def _load_analysis_dataset(file_name: str) -> pd.DataFrame | None:
-    path = PV_DATA_DIR / file_name
+    path = safe_child(PV_DATA_DIR, file_name)
     if not path.exists():
         return None
 
@@ -1508,7 +1509,6 @@ def render_trend_analysis_state(
     _system_number: int | None,
     generated_dataset: dict | None,
 ):
-    hidden = {"display": "none"}
     shown = {"display": "block"}
     empty_figure = _build_empty_figure("Generate a dataset, choose variables, and click Generate Plot.")
     triggered = ctx.triggered_id
@@ -2128,7 +2128,6 @@ def render_preprocessing_state(
     selected_file: str | None,
     config: dict | None,
 ):
-    hidden = {"display": "none"}
     shown = {"display": "block"}
     empty_note = lambda text: html.P(text, className="preprocessing-note")
     active_config = config or _default_preprocess_config()
@@ -2511,10 +2510,19 @@ def download_processed_dataset(
 def handle_upload(contents: str | None, filename: str | None):
     if not contents or not filename:
         return html.P("No file selected.", className="new-system-status-muted")
+    try:
+        decode_csv_upload(contents, filename)
+    except ValueError as exc:
+        return html.P(str(exc), className="preprocessing-export-error")
     return html.P(
         f"File ready: {filename}",
         className="new-system-status-ready",
     )
+
+
+@callback(Output("data-analysis-existing-select", "options"), Input("new-system-result", "children"))
+def refresh_dataset_options(_result):
+    return build_system_file_options()
 
 
 @callback(
@@ -2569,13 +2577,7 @@ def create_new_system(
     # Save uploaded file to a temporary location
     temp_path = None
     try:
-        content_type, content_string = contents.split(",", 1)
-        decoded = base64.b64decode(content_string)
-        temp_dir = PV_DATA_DIR / ".tmp_uploads"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        temp_path = temp_dir / filename
-        with open(temp_path, "wb") as handle:
-            handle.write(decoded)
+        temp_path = save_csv_upload(contents, filename, PV_DATA_DIR / ".tmp_uploads")
     except Exception as exc:
         return html.Div(
             className="new-system-result-error",
@@ -2620,7 +2622,7 @@ def create_new_system(
                     className="new-system-result-text",
                 ),
                 html.P(
-                    "The new dataset is now available in the M2_PVnowcasting_module/data folder. "
+                    "The new dataset is now available. "
                     "Switch to Analyze Existing System to inspect it.",
                     className="new-system-result-note",
                 ),

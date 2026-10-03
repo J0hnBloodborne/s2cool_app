@@ -13,21 +13,20 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from services.config_service import REPO_ROOT
+from services.runtime_service import DATA_ROOT, run_stamp, safe_child
 from services.dataset_service import (
     PV_DATA_DIR,
     _try_parse_ts,
     parse_system_dataset_filename,
 )
 
-PREPROCESSING_OUTPUT_DIR = REPO_ROOT / "M2_PVnowcasting_module" / "preprocessing"
+PREPROCESSING_OUTPUT_DIR = DATA_ROOT / "M2_PVnowcasting_module" / "preprocessing"
 
 SOLAR_CONSTANT = 1367.0  # W/m2
 
@@ -118,7 +117,7 @@ def hash_config(config: dict | None) -> str:
 @lru_cache(maxsize=32)
 def _cached_load_source(file_name: str) -> pd.DataFrame | None:
     """Load and prep the source dataset using repository conventions."""
-    path = PV_DATA_DIR / file_name
+    path = safe_child(PV_DATA_DIR, file_name)
     if not path.exists():
         return None
 
@@ -780,7 +779,7 @@ def build_export_payload(df: pd.DataFrame, metadata: dict, output_dir: Path | st
     """Write processed CSV and quality JSON; return artifact information."""
     output_dir = Path(output_dir) if output_dir else PREPROCESSING_OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = run_stamp()
     stem = metadata.get("stem", "processed")
     csv_path = output_dir / f"{stem}_processed_{stamp}.csv"
     json_path = output_dir / f"{stem}_quality_{stamp}.json"

@@ -12,9 +12,12 @@ import importlib.util
 import io
 import json
 import math
+import re
+import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -22,10 +25,11 @@ import numpy as np
 import pandas as pd
 import joblib
 
-from services.config_service import REPO_ROOT
+from services.runtime_service import DATA_ROOT, REPO_ROOT, MODEL_THREADS, run_stamp, safe_child, serialized_run
 
-PREPROCESSING_DIR = REPO_ROOT / "M2_PVnowcasting_module" / "preprocessing"
-FORECAST_OUTPUT_DIR = REPO_ROOT / "M2_PVnowcasting_module" / "forecast"
+PREPROCESSING_DIR = DATA_ROOT / "M2_PVnowcasting_module" / "preprocessing"
+FORECAST_OUTPUT_DIR = DATA_ROOT / "M2_PVnowcasting_module" / "forecast"
+MODEL_DIR = DATA_ROOT / "models"
 SUPPORTED_HORIZONS = (5, 10, 15, 20, 30, 60, 120)
 M2_FEATURES = (
     "ghi_pyr", "dni", "dhi", "air_temperature", "relative_humidity",
@@ -93,12 +97,14 @@ class ForecastArtifact:
     def system_id(self) -> int | None:
         value = self.metadata.get("system_id")
         return int(value) if value is not None else None
+@lru_cache(maxsize=1)
 def _load_m2_module():
     path = REPO_ROOT / "M2_PVnowcasting_module" / "pv_hybrid_forecasting_multihorizon.py"
     spec = importlib.util.spec_from_file_location("s2cool_m2_pv_forecasting", path)
     if spec is None or spec.loader is None:
         raise ForecastingError(f"Unable to load M2 model module: {path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -150,7 +156,10 @@ def list_forecast_artifacts(system_id: int | None = None) -> list[ForecastArtifa
         csv_name = metadata.get("file")
         if not csv_name:
             continue
-        csv_path = PREPROCESSING_DIR / str(csv_name)
+        try:
+            csv_path = safe_child(PREPROCESSING_DIR, str(csv_name))
+        except ValueError:
+            continue
         if not csv_path.exists():
             continue
         artifact_id = str(metadata.get("artifact_id") or metadata_path.stem)
@@ -296,16 +305,16 @@ def _train_and_predict(
     y_train = model_df[target_column]
     if model_name == "extra_trees":
         from sklearn.ensemble import ExtraTreesRegressor
-        model = ExtraTreesRegressor(n_estimators=int(settings["n_estimators"]), max_depth=None if int(settings["max_depth"]) <= 0 else int(settings["max_depth"]), min_samples_leaf=int(settings["min_samples_leaf"]), max_features=float(settings["max_features"]), random_state=42, n_jobs=-1)
+        model = ExtraTreesRegressor(n_estimators=int(settings["n_estimators"]), max_depth=None if int(settings["max_depth"]) <= 0 else int(settings["max_depth"]), min_samples_leaf=int(settings["min_samples_leaf"]), max_features=float(settings["max_features"]), random_state=42, n_jobs=MODEL_THREADS)
     elif model_name == "random_forest":
         from sklearn.ensemble import RandomForestRegressor
-        model = RandomForestRegressor(n_estimators=int(settings["n_estimators"]), max_depth=None if int(settings["max_depth"]) <= 0 else int(settings["max_depth"]), min_samples_leaf=int(settings["min_samples_leaf"]), max_features=float(settings["max_features"]), random_state=42, n_jobs=-1)
+        model = RandomForestRegressor(n_estimators=int(settings["n_estimators"]), max_depth=None if int(settings["max_depth"]) <= 0 else int(settings["max_depth"]), min_samples_leaf=int(settings["min_samples_leaf"]), max_features=float(settings["max_features"]), random_state=42, n_jobs=MODEL_THREADS)
     elif model_name == "lightgbm":
         from lightgbm import LGBMRegressor
-        model = LGBMRegressor(n_estimators=int(settings["n_estimators"]), learning_rate=float(settings["learning_rate"]), num_leaves=int(settings["num_leaves"]), max_depth=int(settings["max_depth"]), random_state=42, verbosity=-1)
+        model = LGBMRegressor(n_estimators=int(settings["n_estimators"]), learning_rate=float(settings["learning_rate"]), num_leaves=int(settings["num_leaves"]), max_depth=int(settings["max_depth"]), random_state=42, verbosity=-1, n_jobs=MODEL_THREADS)
     elif model_name == "catboost":
         from catboost import CatBoostRegressor
-        model = CatBoostRegressor(iterations=int(settings["iterations"]), depth=int(settings["depth"]), learning_rate=float(settings["learning_rate"]), l2_leaf_reg=float(settings["l2_leaf_reg"]), loss_function="RMSE", verbose=False, random_seed=42)
+        model = CatBoostRegressor(iterations=int(settings["iterations"]), depth=int(settings["depth"]), learning_rate=float(settings["learning_rate"]), l2_leaf_reg=float(settings["l2_leaf_reg"]), loss_function="RMSE", verbose=False, random_seed=42, thread_count=MODEL_THREADS, allow_writing_files=False)
     else:
         raise ForecastingError(f"Unsupported model: {model_name}")
     model.fit(x_train, y_train)
@@ -339,22 +348,23 @@ def _fit_model(df: pd.DataFrame, model_name: str, test_size: float, model_settin
     y_train = model_df[target_column]
     if model_name == "extra_trees":
         from sklearn.ensemble import ExtraTreesRegressor
-        model = ExtraTreesRegressor(n_estimators=int(settings["n_estimators"]), max_depth=None if int(settings["max_depth"]) <= 0 else int(settings["max_depth"]), min_samples_leaf=int(settings["min_samples_leaf"]), max_features=float(settings["max_features"]), random_state=42, n_jobs=-1)
+        model = ExtraTreesRegressor(n_estimators=int(settings["n_estimators"]), max_depth=None if int(settings["max_depth"]) <= 0 else int(settings["max_depth"]), min_samples_leaf=int(settings["min_samples_leaf"]), max_features=float(settings["max_features"]), random_state=42, n_jobs=MODEL_THREADS)
     elif model_name == "random_forest":
         from sklearn.ensemble import RandomForestRegressor
-        model = RandomForestRegressor(n_estimators=int(settings["n_estimators"]), max_depth=None if int(settings["max_depth"]) <= 0 else int(settings["max_depth"]), min_samples_leaf=int(settings["min_samples_leaf"]), max_features=float(settings["max_features"]), random_state=42, n_jobs=-1)
+        model = RandomForestRegressor(n_estimators=int(settings["n_estimators"]), max_depth=None if int(settings["max_depth"]) <= 0 else int(settings["max_depth"]), min_samples_leaf=int(settings["min_samples_leaf"]), max_features=float(settings["max_features"]), random_state=42, n_jobs=MODEL_THREADS)
     elif model_name == "lightgbm":
         from lightgbm import LGBMRegressor
-        model = LGBMRegressor(n_estimators=int(settings["n_estimators"]), learning_rate=float(settings["learning_rate"]), num_leaves=int(settings["num_leaves"]), max_depth=int(settings["max_depth"]), random_state=42, verbosity=-1)
+        model = LGBMRegressor(n_estimators=int(settings["n_estimators"]), learning_rate=float(settings["learning_rate"]), num_leaves=int(settings["num_leaves"]), max_depth=int(settings["max_depth"]), random_state=42, verbosity=-1, n_jobs=MODEL_THREADS)
     elif model_name == "catboost":
         from catboost import CatBoostRegressor
-        model = CatBoostRegressor(iterations=int(settings["iterations"]), depth=int(settings["depth"]), learning_rate=float(settings["learning_rate"]), l2_leaf_reg=float(settings["l2_leaf_reg"]), loss_function="RMSE", verbose=False, random_seed=42)
+        model = CatBoostRegressor(iterations=int(settings["iterations"]), depth=int(settings["depth"]), learning_rate=float(settings["learning_rate"]), l2_leaf_reg=float(settings["l2_leaf_reg"]), loss_function="RMSE", verbose=False, random_seed=42, thread_count=MODEL_THREADS, allow_writing_files=False)
     else:
         raise ForecastingError(f"Unsupported model: {model_name}")
     model.fit(x_train, y_train)
     return model
 
 
+@serialized_run(ForecastingError)
 def train_model(request: dict[str, Any]) -> dict[str, Any]:
     artifact = get_artifact(request.get("artifact_id"))
     horizons = _parse_horizons(request.get("horizons"))
@@ -374,8 +384,44 @@ def train_model(request: dict[str, Any]) -> dict[str, Any]:
             for horizon in horizons
         }
     token = uuid.uuid4().hex
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = MODEL_DIR / f"{token}.tmp"
+    try:
+        joblib.dump(bundle, temporary)
+        temporary.replace(MODEL_DIR / f"{token}.joblib")
+    finally:
+        temporary.unlink(missing_ok=True)
     _TRAINED_MODELS[token] = bundle
-    return {"model_token": token, "artifact_id": artifact.artifact_id, "horizons": horizons, "models": models, "model_settings": effective_settings, "metadata": artifact.metadata, "trained_at": datetime.now().isoformat(timespec="seconds")}
+    info = {"model_token": token, "artifact_id": artifact.artifact_id, "horizons": horizons, "models": models, "model_settings": effective_settings, "metadata": artifact.metadata, "trained_at": datetime.now().isoformat(timespec="seconds")}
+    (MODEL_DIR / f"{token}.json").write_text(json.dumps(info, default=str), encoding="utf-8")
+    # Disk is the source of truth. Keep only the newest model set in RAM.
+    for old_token in list(_TRAINED_MODELS):
+        if old_token != token:
+            _TRAINED_MODELS.pop(old_token, None)
+    return info
+
+
+def list_trained_models() -> list[dict[str, Any]]:
+    options = []
+    for path in sorted(MODEL_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if not re.fullmatch(r"[0-9a-f]{32}", path.stem) or not path.with_suffix(".joblib").is_file():
+            continue
+        try:
+            info = json.loads(path.read_text(encoding="utf-8"))
+            label = f"{info['trained_at'][:19]} | {', '.join(info['models'])} | +{', +'.join(str(h) for h in info['horizons'])} min"
+            options.append({"label": label, "value": path.stem})
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return options
+
+
+def get_trained_model_info(token: str) -> dict[str, Any]:
+    if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise ForecastingError("Select a saved model.")
+    path = MODEL_DIR / f"{token}.json"
+    if not path.is_file() or not path.with_suffix(".joblib").is_file():
+        raise ForecastingError("This saved model is no longer available.")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _bundle_payload(bundle: dict[str, Any]) -> bytes:
@@ -384,31 +430,37 @@ def _bundle_payload(bundle: dict[str, Any]) -> bytes:
     return stream.getvalue()
 
 
-def serialize_trained_model(token: str) -> bytes:
+def _get_bundle(token: str) -> dict[str, Any]:
+    if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise ForecastingError("Train a model before predicting or downloading it.")
     bundle = _TRAINED_MODELS.get(token)
-    if not bundle:
-        raise ForecastingError("Train or upload a model before saving it.")
-    return _bundle_payload(bundle)
+    if bundle is None:
+        path = MODEL_DIR / f"{token}.joblib"
+        if not path.is_file():
+            raise ForecastingError("This model is no longer available. Train it again.")
+        _load_m2_module()
+        # Only bundles created by this server enter MODEL_DIR. Browser uploads
+        # are rejected and never written here: joblib is unsafe for untrusted data.
+        bundle = joblib.load(path)
+        _TRAINED_MODELS.clear()
+        _TRAINED_MODELS[token] = bundle
+    return bundle
+
+
+def serialize_trained_model(token: str) -> bytes:
+    return _bundle_payload(_get_bundle(token))
 
 
 def load_trained_model(contents: bytes) -> dict[str, Any]:
-    try:
-        bundle = joblib.load(io.BytesIO(contents))
-    except Exception as exc:
-        raise ForecastingError(f"Could not load the trained model file: {exc}") from exc
-    required = {"artifact_id", "horizons", "models", "estimators"}
-    if not isinstance(bundle, dict) or not required.issubset(bundle):
-        raise ForecastingError("The uploaded file is not a compatible PV forecasting model bundle.")
-    token = uuid.uuid4().hex
-    _TRAINED_MODELS[token] = bundle
-    return {"model_token": token, "artifact_id": bundle["artifact_id"], "horizons": bundle["horizons"], "models": bundle["models"], "model_settings": bundle.get("model_settings", {}), "metadata": bundle.get("metadata", {}), "trained_at": "Uploaded model"}
+    raise ForecastingError("Saved-model uploads are disabled. Train a model in this app.")
 
 
+@serialized_run(ForecastingError)
 def predict_trained_model(token: str, request: dict[str, Any]) -> dict[str, Any]:
     context = request.get("_context")
-    bundle = context["bundle"] if context else _TRAINED_MODELS.get(token)
+    bundle = context["bundle"] if context else _get_bundle(token)
     if not bundle:
-        raise ForecastingError("Train or upload a trained model before predicting.")
+        raise ForecastingError("Select or train a model before predicting.")
     artifact = context["artifact"] if context else get_artifact(bundle["artifact_id"])
     horizons = _parse_horizons(request.get("horizons") or bundle["horizons"])
     models = list(bundle["models"])
@@ -433,7 +485,7 @@ def predict_trained_model(token: str, request: dict[str, Any]) -> dict[str, Any]
         for horizon in horizons:
             estimator = bundle["estimators"].get(model_name, {}).get(horizon)
             if estimator is None:
-                raise ForecastingError(f"The uploaded model does not contain a +{horizon} minute estimator.")
+                raise ForecastingError(f"The saved model does not contain a +{horizon} minute estimator.")
             if model_name == "lstm":
                 prediction = _load_m2_module().predict_lstm(df, estimator)
                 row = prediction[prediction["_ts"] == source_timestamp]
@@ -446,6 +498,7 @@ def predict_trained_model(token: str, request: dict[str, Any]) -> dict[str, Any]
     return {"artifact_id": artifact.artifact_id, "horizons": horizons, "models": models, "model": models[0] if len(models) == 1 else "comparison", "metadata": artifact.metadata, "capacity_kw": bundle.get("capacity_kw", 1.0), "latest_timestamp": timestamp.isoformat(), "generated_at": datetime.now().isoformat(timespec="seconds"), "results": results}
 
 
+@serialized_run(ForecastingError)
 def predict_trained_model_range(token: str, request: dict[str, Any]) -> dict[str, Any]:
     """Generate timestamp predictions across a user-selected time range."""
     start = pd.to_datetime(request.get("start"), errors="coerce")
@@ -455,9 +508,9 @@ def predict_trained_model_range(token: str, request: dict[str, Any]) -> dict[str
     if end < start:
         raise ForecastingError("Forecast end must be after the forecast start.")
 
-    bundle = _TRAINED_MODELS.get(token)
+    bundle = _get_bundle(token)
     if not bundle:
-        raise ForecastingError("Train or upload a trained model before predicting.")
+        raise ForecastingError("Select or train a model before predicting.")
     artifact = get_artifact(bundle["artifact_id"])
     frame = _load_artifact_frame(artifact).copy()
     interval = float(artifact.metadata.get("sampling_interval_minutes") or 5)
@@ -640,7 +693,6 @@ def _json_frame(frame: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 def _run(request: dict[str, Any], latest_only: bool = False) -> dict[str, Any]:
-    system_id = request.get("system_id")
     # The artifact selector intentionally spans all systems.  The selected
     # artifact is the source of truth for system metadata and capacity.
     artifact = get_artifact(request.get("artifact_id"))
@@ -710,10 +762,12 @@ def _run(request: dict[str, Any], latest_only: bool = False) -> dict[str, Any]:
     }
 
 
+@serialized_run(ForecastingError)
 def run_backtest(request: dict[str, Any]) -> dict[str, Any]:
     return _run(request, latest_only=False)
 
 
+@serialized_run(ForecastingError)
 def generate_forecast(request: dict[str, Any]) -> dict[str, Any]:
     return _run(request, latest_only=True)
 
@@ -728,12 +782,12 @@ def build_forecast_metrics(result: dict[str, Any]) -> list[dict[str, Any]]:
 
 def export_forecast_result(result: dict[str, Any]) -> dict[str, str]:
     FORECAST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem = f"pv_forecast_{result.get('metadata', {}).get('system_id', 'system')}_{stamp}"
+    stamp = run_stamp()
+    stem = f"pv_forecast_{stamp}"
     csv_paths = []
     for model, payload in result.get("results", {}).items():
         if payload.get("records"):
-            path = FORECAST_OUTPUT_DIR / f"{stem}_{model}.csv"
+            path = safe_child(FORECAST_OUTPUT_DIR, f"{stem}_{model}.csv")
             pd.DataFrame(payload["records"]).to_csv(path, index=False)
             csv_paths.append(str(path))
     metrics_path = FORECAST_OUTPUT_DIR / f"{stem}_metrics.csv"

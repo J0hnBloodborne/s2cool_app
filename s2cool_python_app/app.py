@@ -10,6 +10,8 @@ from dash import Dash, Input, Output, callback, dcc, html
 
 from pages import cooling_demand, dashboard, data_analysis, pv_forecasting
 from services.config_service import get_system, get_system_options
+from services.dataset_service import latest_system_dataset_path
+from services.access_service import configure_access
 
 APP_TITLE = "S2Cool Research Dashboard"
 TAB_ITEMS = [
@@ -27,9 +29,13 @@ TAB_ITEMS = [
 app = Dash(__name__, suppress_callback_exceptions=True)
 app.title = APP_TITLE
 server = app.server
+configure_access(server)
 
 system_options = get_system_options()
-default_system = system_options[0]["value"] if system_options else None
+default_system = next(
+    (item["value"] for item in system_options if latest_system_dataset_path(item["value"])),
+    system_options[0]["value"] if system_options else None,
+)
 
 app.layout = html.Div(
     className="app-shell",
@@ -109,8 +115,8 @@ app.layout = html.Div(
                             searchable=False,
                         ),
                         html.Span("|", className="context-divider"),
-                        html.Span("Lab Unit #01 - Status:", className="context-label"),
-                        html.Span("RUNNING", className="status-running"),
+                        html.Span("Workspace:", className="context-label"),
+                        html.Span("DEMO", className="status-running"),
                         dcc.Dropdown(
                             id="system-select",
                             className="inline-select medium-select",
@@ -119,13 +125,13 @@ app.layout = html.Div(
                             clearable=False,
                             searchable=False,
                         ),
-                        html.Div("All Systems Normal", className="health-pill"),
+                        html.Div("Offline study data", className="health-pill"),
                     ],
                 ),
                 html.Div(
                     className="context-right",
                     children=[
-                        html.Span("Updated: 12:15 PM", className="updated-label"),
+                        html.Span("Research demo", className="updated-label"),
                         html.Span("", className="header-circle"),
                         html.Span("", className="header-circle"),
                     ],
@@ -143,7 +149,7 @@ app.layout = html.Div(
                             className="content-heading",
                             children=[
                                 html.H2("Research Workspace"),
-                                html.P("Dashboard shell aligned to the control-center style so you can continue building the analysis modules on top of it."),
+                                html.P("Explore solar power and cooling demand with the bundled study data."),
                             ],
                         ),
                         html.Div(
@@ -230,6 +236,6 @@ if __name__ == "__main__":
             browser = webbrowser.get()
         browser.open_new(APP_URL)
 
-    if host == "127.0.0.1" and os.environ.get("RENDER") != "true":
+    if host == "127.0.0.1" and os.environ.get("S2COOL_OPEN_BROWSER", "0") == "1":
         threading.Timer(1.2, open_mozilla_firefox).start()
     app.run(debug=debug, host=host, port=port)

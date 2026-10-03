@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -16,7 +15,8 @@ from services.forecasting_service import (
     ForecastingError,
     build_forecast_metrics,
     export_forecast_result,
-    load_trained_model,
+    get_trained_model_info,
+    list_trained_models,
     list_forecast_artifacts,
     model_options,
     predict_trained_model,
@@ -468,7 +468,7 @@ def build_layout(system: SystemRecord | None) -> html.Div:
         dcc.Store(id="pv-system-id", data=system.system_number if system else None),
         dcc.Store(id="pv-forecast-result", data=None),
         dcc.Store(id="pv-model-settings", data=DEFAULT_MODEL_SETTINGS),
-        dcc.Store(id="pv-trained-model", data=None),
+        dcc.Store(id="pv-trained-model", storage_type="session"),
         dcc.Download(id="pv-download-model"), dcc.Download(id="pv-download-forecast"), dcc.Download(id="pv-download-metrics"), dcc.Download(id="pv-download-summary"),
         panel("PV Forecasting Workbench", "PV forecasting connected to the exported Data Analysis preprocessing profile.", [
             html.Div(className="two-col-grid", children=[
@@ -486,9 +486,10 @@ def build_layout(system: SystemRecord | None) -> html.Div:
                     dcc.Checklist(id="pv-weather-select", className="pv-checklist pv-weather-checklist", options=[{"label": " Show GHI trace", "value": "ghi"}], value=[], inline=True),
                     html.Div(className="action-button-row", children=[
                         html.Button("Train Model", id="pv-train-model", className="action-btn action-btn-primary"),
-                        html.Button("Save Trained Model", id="pv-save-model-btn", className="action-btn", disabled=True),
-                        dcc.Upload(id="pv-trained-model-upload", contents=None, filename=None, children=html.Button("Upload Saved Model", id="pv-upload-model-btn", className="action-btn"), className="pv-upload-model"),
+                        html.Button("Download Trained Model", id="pv-save-model-btn", className="action-btn", disabled=True),
                     ]),
+                    html.Label("Saved models on this server", className="muted"),
+                    dcc.Dropdown(id="pv-saved-model-select", options=list_trained_models(), placeholder="Select a model from an earlier run"),
                     html.Div(id="pv-upload-model-status", className="preprocessing-export-status"),
                     html.Div(id="pv-save-model-status", className="preprocessing-export-status"),
                     html.Div(id="pv-run-status", className="preprocessing-export-status"),
@@ -537,7 +538,7 @@ def build_layout(system: SystemRecord | None) -> html.Div:
                 color="#4f72cb",
                 children=dcc.Graph(
                     id="pv-forecast-graph",
-                    figure=_empty_figure("Train or upload a model, then generate a forecast curve."),
+                    figure=_empty_figure("Train a model, then generate a forecast curve."),
                     className="trend-graph"
                 )
             ),
@@ -655,17 +656,15 @@ def finish_training_state(_status):
     return False, "action-btn action-btn-primary"
 
 
-@callback(Output("pv-trained-model", "data"), Output("pv-save-model-btn", "disabled"), Output("pv-upload-model-status", "children"), Output("pv-forecast-result", "data"), Output("pv-run-status", "children"), Output("pv-run-summary", "children"), Output("pv-kpi-grid", "children"), Output("pv-forecast-graph", "figure"), Output("pv-diagnostic-residual-graph", "figure"), Output("pv-diagnostic-r2-graph", "figure"), Output("pv-diagnostic-mae-graph", "figure"), Output("pv-diagnostic-rmse-graph", "figure"), Output("pv-metrics-table", "children"), Input("pv-train-model", "n_clicks"), Input("pv-trained-model-upload", "contents"), Input("pv-predict-forecast", "n_clicks"), Input("pv-generate-forecast-curve", "n_clicks"), State("pv-trained-model-upload", "filename"), State("pv-trained-model", "data"), State("pv-artifact-select", "value"), State("pv-horizon-select", "value"), State("pv-model-select", "value"), State("pv-model-settings", "data"), State("pv-predict-date", "date"), State("pv-predict-time", "value"), State("pv-curve-start-date", "date"), State("pv-curve-start-time", "value"), State("pv-curve-end-date", "date"), State("pv-curve-end-time", "value"), State("pv-weather-select", "value"), State("pv-system-id", "data"), prevent_initial_call=True)
-def run_pv_forecast(_train_clicks, upload_contents, _predict_clicks, _curve_clicks, upload_filename, trained_model, artifact_id, horizons, models, model_settings, predict_date, predict_time, curve_start_date, curve_start_time, curve_end_date, curve_end_time, weather, system_id):
-    empty = _empty_figure("Train or upload a model, then predict a timestamp.")
+@callback(Output("pv-trained-model", "data"), Output("pv-save-model-btn", "disabled"), Output("pv-upload-model-status", "children"), Output("pv-forecast-result", "data"), Output("pv-run-status", "children"), Output("pv-run-summary", "children"), Output("pv-kpi-grid", "children"), Output("pv-forecast-graph", "figure"), Output("pv-diagnostic-residual-graph", "figure"), Output("pv-diagnostic-r2-graph", "figure"), Output("pv-diagnostic-mae-graph", "figure"), Output("pv-diagnostic-rmse-graph", "figure"), Output("pv-metrics-table", "children"), Input("pv-train-model", "n_clicks"), Input("pv-saved-model-select", "value"), Input("pv-predict-forecast", "n_clicks"), Input("pv-generate-forecast-curve", "n_clicks"), State("pv-trained-model", "data"), State("pv-artifact-select", "value"), State("pv-horizon-select", "value"), State("pv-model-select", "value"), State("pv-model-settings", "data"), State("pv-predict-date", "date"), State("pv-predict-time", "value"), State("pv-curve-start-date", "date"), State("pv-curve-start-time", "value"), State("pv-curve-end-date", "date"), State("pv-curve-end-time", "value"), State("pv-weather-select", "value"), State("pv-system-id", "data"), prevent_initial_call=True)
+def run_pv_forecast(_train_clicks, saved_token, _predict_clicks, _curve_clicks, trained_model, artifact_id, horizons, models, model_settings, predict_date, predict_time, curve_start_date, curve_start_time, curve_end_date, curve_end_time, weather, system_id):
+    empty = _empty_figure("Train a model, then predict a timestamp.")
     empty_small = _empty_figure("Diagnostics are available after a prediction.", 360)
     triggered = ctx.triggered_id
-    if triggered == "pv-trained-model-upload" and upload_contents:
-        import base64
+    if triggered == "pv-saved-model-select" and saved_token:
         try:
-            encoded = upload_contents.split(",", 1)[1]
-            info = load_trained_model(base64.b64decode(encoded))
-            return info, False, html.P(f"Loaded {upload_filename or 'trained model'}.", className="preprocessing-export-success"), no_update, html.P("Trained model uploaded and ready for prediction.", className="preprocessing-export-success"), no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
+            info = get_trained_model_info(saved_token)
+            return info, False, html.P("Saved model selected.", className="preprocessing-export-success"), no_update, html.P("Ready for prediction.", className="preprocessing-export-success"), no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
         except Exception as exc:
             return no_update, True, html.P(str(exc), className="preprocessing-export-error"), no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
     if not artifact_id:
@@ -684,7 +683,7 @@ def run_pv_forecast(_train_clicks, upload_contents, _predict_clicks, _curve_clic
             return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
         token = (trained_model or {}).get("model_token", "")
         if not isinstance(token, str) or not token.strip():
-            message = html.P("Train or upload a model before predicting.", className="preprocessing-export-error")
+            message = html.P("Train a model before predicting.", className="preprocessing-export-error")
             return no_update, no_update, no_update, no_update, message, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
         if triggered == "pv-generate-forecast-curve":
             start = f"{curve_start_date} {curve_start_time or '00:00'}" if curve_start_date else None
@@ -726,47 +725,17 @@ def run_pv_forecast(_train_clicks, upload_contents, _predict_clicks, _curve_clic
 def save_pv_model(_clicks, trained_model):
     token = (trained_model or {}).get("model_token")
     if not token:
-        return no_update, html.P("Train or upload a model before saving.", className="preprocessing-export-error")
-    models = "-".join((trained_model.get("models") or ["model"]))
-    horizons = "-".join(str(value) for value in (trained_model.get("horizons") or []))
-    settings = trained_model.get("model_settings") or {}
-    setting_parts = []
-    for model_name in trained_model.get("models") or []:
-        values = settings.get(model_name) or {}
-        key_aliases = {
-            "n_estimators": "est", "max_depth": "depth", "learning_rate": "lr",
-            "sequence_length": "seq", "epochs": "ep", "batch_size": "bs",
-            "min_samples_leaf": "leaf", "max_features": "feat", "num_leaves": "leaves",
-            "iterations": "iter", "depth": "depth", "l2_leaf_reg": "l2",
-        }
-        model_settings = [
-            f"{key_aliases.get(key, key)}{value}"
-            for key, value in values.items()
-            if value is not None
-        ]
-        setting_parts.append(f"{model_name}-{'_'.join(model_settings)}")
-    trained_at = str(trained_model.get("trained_at", "saved")).replace("-", "").replace(":", "").replace(" ", "_")
-    filename = f"pv_model_{models}_h{horizons}_{'_'.join(setting_parts)}_{trained_at}.joblib"
+        return no_update, html.P("Train a model before saving.", className="preprocessing-export-error")
+    filename = f"pv_model_{str(token)[:12]}.joblib"
     try:
-        import tkinter as tk
-        from tkinter import filedialog
-
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        selected_path = filedialog.asksaveasfilename(
-            title="Save trained PV model",
-            initialfile=filename,
-            defaultextension=".joblib",
-            filetypes=[("Joblib model", "*.joblib"), ("All files", "*.*")],
-        )
-        root.destroy()
-        if not selected_path:
-            return no_update, html.P("Model save cancelled.", className="preprocessing-export-status")
-        Path(selected_path).write_bytes(serialize_trained_model(token))
-        return no_update, html.P(f"Model saved to {selected_path}", className="preprocessing-export-success")
+        return dcc.send_bytes(serialize_trained_model(token), filename), html.P("Model download ready.", className="preprocessing-export-success")
     except Exception as exc:
         return no_update, html.P(f"Could not save model: {exc}", className="preprocessing-export-error")
+
+
+@callback(Output("pv-saved-model-select", "options"), Input("pv-run-status", "children"))
+def refresh_saved_models(_status):
+    return list_trained_models()
 
 
 @callback(Output("pv-export-status", "children"), Output("pv-download-forecast", "data"), Output("pv-download-metrics", "data"), Output("pv-download-summary", "data"), Input("pv-download-forecast-btn", "n_clicks"), Input("pv-download-metrics-btn", "n_clicks"), Input("pv-download-summary-btn", "n_clicks"), State("pv-forecast-result", "data"), prevent_initial_call=True)

@@ -7,8 +7,12 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 s2cool_python_app/catboost_info/
-s2cool_python_app/tests/
-s2cool_python_app/requirements-forecasting-optional.txt
+runtime/
+.env
+.env.*
+!.env.example
+*.log
+.ruff_cache/
 build/
 dist/
 *.spec

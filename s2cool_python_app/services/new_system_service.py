@@ -10,14 +10,15 @@ This service:
 
 from __future__ import annotations
 
+import math
 import re
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 import requests
 
-from services.config_service import REPO_ROOT
+from services.runtime_service import run_stamp, safe_child
 from services.dataset_service import PV_DATA_DIR
 
 OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
@@ -190,7 +191,7 @@ def _fetch_openmeteo_weather(
     if missing:
         raise NewSystemError(f"Open-Meteo response missing keys: {missing}")
 
-    weather_times = pd.to_datetime(hourly["time"], errors="coerce")
+    weather_times = pd.Series(pd.to_datetime(hourly["time"], errors="coerce"))
     if isinstance(weather_times.dtype, pd.DatetimeTZDtype):
         weather_times = weather_times.dt.tz_convert(timezone).dt.tz_localize(None)
 
@@ -259,7 +260,9 @@ def _build_output_name(
     end_day: date,
 ) -> str:
     """Build the output filename following the existing convention."""
-    safe_city = city.replace(" ", "_")
+    safe_city = re.sub(r"[^\w-]+", "-", city).replace("_", "-").strip("-")
+    if not safe_city:
+        raise NewSystemError("Enter a valid city name.")
     return (
         f"system{int(system_id):02d}_{capacity_kw:.1f}kW_{safe_city}_"
         f"lat{lat}_lon{lon}_{start_day.strftime('%Y%m%d')}_{end_day.strftime('%Y%m%d')}_weather.csv"
@@ -294,12 +297,16 @@ def create_new_system_dataset(
     # --- Validate inputs ---
     if not system_id or system_id <= 0:
         raise NewSystemError("System ID must be a positive integer.")
-    if not capacity_kw or capacity_kw <= 0:
+    if not capacity_kw or not math.isfinite(float(capacity_kw)) or capacity_kw <= 0:
         raise NewSystemError("Capacity must be a positive number (kW).")
     if not city or not str(city).strip():
         raise NewSystemError("City name is required.")
     if lat is None or lon is None:
         raise NewSystemError("Latitude and longitude are required.")
+    if not math.isfinite(float(lat)) or not -90 <= float(lat) <= 90:
+        raise NewSystemError("Latitude must be between -90 and 90.")
+    if not math.isfinite(float(lon)) or not -180 <= float(lon) <= 180:
+        raise NewSystemError("Longitude must be between -180 and 180.")
 
     # --- Load uploaded file ---
     upload_path = Path(uploaded_file_path)
@@ -319,7 +326,9 @@ def create_new_system_dataset(
     time_col = _resolve_time_column(df)
     power_col = _resolve_pv_power_column(df)
 
-    if date_col is None and time_col is None:
+    if time_col is None and any(alias in df.columns for alias in (
+        "timestamp", "Timestamp", "datetime", "DateTime", "date_time", "Date_Time"
+    )):
         # Try to find a single datetime column
         datetime_col = None
         for alias in ["timestamp", "Timestamp", "datetime", "DateTime", "date_time", "Date_Time"]:
@@ -403,15 +412,14 @@ def create_new_system_dataset(
         end_day=end_day,
     )
 
-    output_path = PV_DATA_DIR / output_name
+    output_path = safe_child(PV_DATA_DIR, output_name)
     PV_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # If file already exists, add a timestamp suffix
     if output_path.exists():
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = PV_DATA_DIR / output_name.replace(".csv", f"_created_{stamp}.csv")
+        output_path = PV_DATA_DIR / output_name.replace("_weather.csv", f"_created_{run_stamp()}_weather.csv")
 
-    final_out.to_csv(output_path, index=False)
+    final_out.to_csv(output_path, index=False, mode="x")
 
     return {
         "file_name": output_path.name,

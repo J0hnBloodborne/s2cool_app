@@ -5,15 +5,14 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from models.domain import DatasetSnapshot
-from services.config_service import REPO_ROOT
+from services.runtime_service import DATA_ROOT, safe_child
 
-PV_DATA_DIR = REPO_ROOT / "M2_PVnowcasting_module" / "data"
-PV_FORECAST_DIR = REPO_ROOT / "M2_PVnowcasting_module" / "forecast"
-COOLING_DIR = REPO_ROOT / "cooling_demand"
+PV_DATA_DIR = DATA_ROOT / "M2_PVnowcasting_module" / "data"
+PV_FORECAST_DIR = DATA_ROOT / "M2_PVnowcasting_module" / "forecast"
+COOLING_DIR = DATA_ROOT / "M3_CoolingLoad_prediction_module" / "forecast"
 
 REQUIRED_ANALYSIS_COLUMNS = [
     "date",
@@ -33,7 +32,7 @@ SYSTEM_FILE_PATTERN = re.compile(
     r"(?P<city>[^_]+)_"
     r"lat(?P<lat>-?[\d.]+)_"
     r"lon(?P<lon>-?[\d.]+)_"
-    r"(?P<name_start>\d{8})_(?P<name_end>\d{8})_weather\.csv$"
+    r"(?P<name_start>\d{8})_(?P<name_end>\d{8})(?:_created_[\da-f_]+)?_weather\.csv$"
 )
 
 
@@ -107,7 +106,7 @@ def build_system_file_options() -> list[dict]:
 
 @lru_cache(maxsize=128)
 def build_system_dataset_profile(file_name: str) -> dict | None:
-    path = PV_DATA_DIR / file_name
+    path = safe_child(PV_DATA_DIR, file_name)
     if not path.exists():
         return None
 

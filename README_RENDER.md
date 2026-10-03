@@ -1,5 +1,8 @@
 # S2Cool Render Deployment
 
+The current demo targets Oracle A1. Use [README_ORACLE.md](README_ORACLE.md).
+The steps below describe the earlier Render setup.
+
 ## Deploy
 
 1. Create a new GitHub repository for the trimmed S2Cool deployment.

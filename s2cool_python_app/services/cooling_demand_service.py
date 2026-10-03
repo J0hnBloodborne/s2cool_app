@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
-import base64
 import io
 import json
 import math
 import re
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -26,17 +26,17 @@ import pandas as pd
 
 from services.config_service import (
     CONFIG_DIR,
-    REPO_ROOT,
     _load_json,
     load_cooling_site_payloads,
-    load_model_defaults,
     load_systems,
 )
+from services.runtime_service import DATA_ROOT, REPO_ROOT, MODEL_THREADS, PROFILE_LOCK, run_stamp, safe_child, serialized_run
+from services.upload_service import decode_csv_upload
 
 M3_DIR = REPO_ROOT / "M3_CoolingLoad_prediction_module"
-M3_DATA_DIR = M3_DIR / "data"
-COOLING_OUTPUT_DIR = M3_DIR / "forecast"
-DATA_ANALYSIS_DIR = REPO_ROOT / "M2_PVnowcasting_module" / "preprocessing"
+M3_DATA_DIR = DATA_ROOT / "M3_CoolingLoad_prediction_module" / "data"
+COOLING_OUTPUT_DIR = DATA_ROOT / "M3_CoolingLoad_prediction_module" / "forecast"
+DATA_ANALYSIS_DIR = DATA_ROOT / "M2_PVnowcasting_module" / "preprocessing"
 SUPPORTED_HORIZONS = (5, 10, 15, 20, 30, 60, 120)
 TREE_MODEL_NAMES = ("xgboost", "extra_trees", "random_forest", "lightgbm", "catboost")
 FORECAST_MODEL_NAMES = TREE_MODEL_NAMES + ("lstm",)
@@ -98,6 +98,7 @@ class CoolingSource:
     metadata: dict[str, Any] | None = None
 
 
+@lru_cache(maxsize=1)
 def _load_m3_module():
     path = M3_DIR / "cooling_hybrid_forecasting_multihorizon.py"
     spec = importlib.util.spec_from_file_location("s2cool_m3_cooling_forecasting", path)
@@ -187,7 +188,10 @@ def _find_data_analysis_artifact(system_id: int | None) -> tuple[Path | None, di
         if int(metadata.get("system_id", -1)) != int(system_id):
             continue
         file_name = metadata.get("file")
-        csv_path = DATA_ANALYSIS_DIR / str(file_name) if file_name else None
+        try:
+            csv_path = safe_child(DATA_ANALYSIS_DIR, str(file_name)) if file_name else None
+        except ValueError:
+            continue
         if csv_path and csv_path.exists():
             return csv_path, metadata
     return None, {}
@@ -214,8 +218,8 @@ def list_cooling_profiles() -> list[dict[str, Any]]:
 def _profile_source(profile: dict[str, Any]) -> Path | None:
     explicit = profile.get("data_source")
     if explicit:
-        path = REPO_ROOT / str(explicit)
-        if path.exists():
+        path = (DATA_ROOT / str(explicit)).resolve()
+        if path.is_relative_to(DATA_ROOT) and path.exists():
             return path
     if profile.get("data_source_system_id"):
         return _find_system_dataset(int(profile["data_source_system_id"]))
@@ -235,7 +239,6 @@ def list_cooling_sources(system_id: int | None = None) -> list[CoolingSource]:
         source_system_id = metadata.get("system_id")
         if system_id is not None and source_system_id != int(system_id):
             continue
-        source_system = _system_by_id(source_system_id)
         label = f"System {int(source_system_id):02d} | {metadata.get('city') or '-'} | {metadata.get('capacity_kw') or '-'} kW"
         sources.append(CoolingSource(
             source_id=f"system-{int(source_system_id):02d}",
@@ -460,6 +463,7 @@ def _fit_residual_model(df: pd.DataFrame, feature_cols: list[str], train_mask: p
                 colsample_bytree=float(settings.get("colsample_bytree", 0.9)),
                 reg_lambda=float(settings.get("reg_lambda", 1.0)),
                 random_state=42, objective="reg:squarederror", verbosity=0,
+                n_jobs=MODEL_THREADS,
             )
         except Exception:
             from sklearn.ensemble import GradientBoostingRegressor
@@ -473,7 +477,7 @@ def _fit_residual_model(df: pd.DataFrame, feature_cols: list[str], train_mask: p
             n_estimators=int(settings.get("n_estimators", 250)),
             max_depth=None if int(settings.get("max_depth", 0)) <= 0 else int(settings["max_depth"]),
             min_samples_leaf=int(settings.get("min_samples_leaf", 2)),
-            max_features=float(settings.get("max_features", 1.0)), random_state=42, n_jobs=-1,
+            max_features=float(settings.get("max_features", 1.0)), random_state=42, n_jobs=MODEL_THREADS,
         )
     elif model_name == "random_forest":
         from sklearn.ensemble import RandomForestRegressor
@@ -481,21 +485,21 @@ def _fit_residual_model(df: pd.DataFrame, feature_cols: list[str], train_mask: p
             n_estimators=int(settings.get("n_estimators", 200)),
             max_depth=None if int(settings.get("max_depth", 0)) <= 0 else int(settings["max_depth"]),
             min_samples_leaf=int(settings.get("min_samples_leaf", 2)),
-            max_features=float(settings.get("max_features", 1.0)), random_state=42, n_jobs=-1,
+            max_features=float(settings.get("max_features", 1.0)), random_state=42, n_jobs=MODEL_THREADS,
         )
     elif model_name == "lightgbm":
         from lightgbm import LGBMRegressor
         estimator = LGBMRegressor(
             n_estimators=int(settings.get("n_estimators", 300)), learning_rate=float(settings.get("learning_rate", 0.05)),
             num_leaves=int(settings.get("num_leaves", 31)), max_depth=int(settings.get("max_depth", -1)),
-            random_state=42, verbosity=-1,
+            random_state=42, verbosity=-1, n_jobs=MODEL_THREADS,
         )
     elif model_name == "catboost":
         from catboost import CatBoostRegressor
         estimator = CatBoostRegressor(
             iterations=int(settings.get("iterations", 300)), depth=int(settings.get("depth", 7)),
             learning_rate=float(settings.get("learning_rate", 0.05)), l2_leaf_reg=float(settings.get("l2_leaf_reg", 3.0)),
-            loss_function="RMSE", verbose=False, random_seed=42,
+            loss_function="RMSE", verbose=False, random_seed=42, thread_count=MODEL_THREADS, allow_writing_files=False,
         )
     elif model_name == "lstm":
         try:
@@ -504,11 +508,13 @@ def _fit_residual_model(df: pd.DataFrame, feature_cols: list[str], train_mask: p
         except Exception as exc:
             raise CoolingDemandError(f"LSTM requires PyTorch and scikit-learn: {exc}") from exc
         sequence_length = max(2, int(settings.get("sequence_length", 12)))
+        torch.set_num_threads(MODEL_THREADS)
         ordered = model_df.sort_index().copy()
         scaler = StandardScaler()
-        features = scaler.fit_transform(ordered[feature_cols].to_numpy(dtype=np.float32))
+        scaler.fit(train_df[feature_cols].to_numpy(dtype=np.float32))
+        features = scaler.transform(ordered[feature_cols].to_numpy(dtype=np.float32))
         targets = ordered["residual"].to_numpy(dtype=np.float32)
-        train_flags = train.reindex(ordered.index).fillna(False).to_numpy(dtype=bool)
+        train_flags = ordered.index.isin(train_df.index)
         sequences, sequence_targets, sequence_positions = [], [], []
         for position in range(sequence_length - 1, len(ordered)):
             if train_flags[position]:
@@ -519,7 +525,6 @@ def _fit_residual_model(df: pd.DataFrame, feature_cols: list[str], train_mask: p
             raise CoolingDemandError("LSTM requires at least 100 valid training sequences.")
         torch.manual_seed(42)
         device = torch.device("cpu")
-        network = torch.nn.Sequential()  # placeholder keeps the model CPU-only and reproducible
         class CoolingLSTM(torch.nn.Module):
             def __init__(self, input_size: int):
                 super().__init__()
@@ -739,8 +744,7 @@ def _synthetic_q_measured(df: pd.DataFrame, profile: dict[str, Any], request: di
 
 def _experimental_q_measured(contents: str, filename: str | None, m3) -> pd.DataFrame:
     try:
-        encoded = contents.split(",", 1)[1] if "," in contents else contents
-        uploaded = pd.read_csv(io.BytesIO(base64.b64decode(encoded)))
+        uploaded = pd.read_csv(io.BytesIO(decode_csv_upload(contents, filename)))
     except Exception as exc:
         raise CoolingDemandError(f"Unable to read experimental CSV{f' {filename}' if filename else ''}: {exc}") from exc
     if "_ts" in uploaded.columns:
@@ -881,6 +885,7 @@ def _run(request: dict[str, Any], latest_only: bool = False) -> dict[str, Any]:
     return result
 
 
+@serialized_run(CoolingDemandError)
 def _run_for_models(request: dict[str, Any], latest_only: bool) -> dict[str, Any]:
     requested = request.get("models") or request.get("model") or "xgboost"
     models = [str(value) for value in requested] if isinstance(requested, (list, tuple, set)) else [str(requested)]
@@ -924,8 +929,8 @@ def build_cooling_metrics(result: dict[str, Any]) -> list[dict[str, Any]]:
 
 def export_cooling_result(result: dict[str, Any]) -> dict[str, str]:
     COOLING_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem = f"cooling_{result.get('metadata', {}).get('system_id') or result.get('metadata', {}).get('site_id') or 'run'}_{stamp}"
+    stamp = run_stamp()
+    stem = f"cooling_{stamp}"
     forecast_path = COOLING_OUTPUT_DIR / f"{stem}_forecast.csv"
     pd.DataFrame(result.get("records") or []).to_csv(forecast_path, index=False)
     metrics_path = COOLING_OUTPUT_DIR / f"{stem}_metrics.csv"
@@ -949,15 +954,18 @@ def export_cooling_result(result: dict[str, Any]) -> dict[str, str]:
 
 def save_cooling_profile(profile: dict[str, Any]) -> dict[str, Any]:
     _validate_profile(profile)
-    path = CONFIG_DIR / "cooling_sites.json"
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    sites = payload.setdefault("sites", [])
-    existing = next((index for index, item in enumerate(sites) if item.get("site_id") == profile.get("site_id")), None)
-    if existing is None:
-        sites.append(profile)
-    else:
-        sites[existing] = profile
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    _load_json.cache_clear()
-    load_cooling_site_payloads.cache_clear()
+    with PROFILE_LOCK:
+        path = CONFIG_DIR / "cooling_sites.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        sites = payload.setdefault("sites", [])
+        existing = next((index for index, item in enumerate(sites) if item.get("site_id") == profile.get("site_id")), None)
+        if existing is None:
+            sites.append(profile)
+        else:
+            sites[existing] = profile
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temporary.replace(path)
+        _load_json.cache_clear()
+        load_cooling_site_payloads.cache_clear()
     return profile

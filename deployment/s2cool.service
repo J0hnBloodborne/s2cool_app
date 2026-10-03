@@ -1,0 +1,28 @@
+[Unit]
+Description=S2Cool demo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=s2cool
+Group=s2cool
+WorkingDirectory=/opt/s2cool/app
+EnvironmentFile=/etc/s2cool/demo.env
+Environment=S2COOL_DATA_DIR=/var/lib/s2cool
+Environment=S2COOL_REQUIRE_AUTH=1
+Environment=S2COOL_MODEL_THREADS=2
+Environment=MPLCONFIGDIR=/var/lib/s2cool/.matplotlib
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/s2cool/app/.venv/bin/python -m gunicorn -c deployment/gunicorn.conf.py wsgi:server
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/s2cool
+
+[Install]
+WantedBy=multi-user.target

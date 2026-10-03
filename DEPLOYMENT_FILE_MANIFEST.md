@@ -1,4 +1,10 @@
-# Render Deployment File Manifest
+# Deployment file manifest
+
+The Oracle demo now uses `scripts/build_bundle.py` and `README_ORACLE.md`.
+The bundle includes all three code folders and one root entry point.
+Writable work lives outside those folders in `S2COOL_DATA_DIR`.
+
+The list below is the original Render file list.
 
 The GitHub deployment repository should contain these runtime trees:
 
